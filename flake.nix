@@ -39,36 +39,57 @@
           mkdir -p $out/bin
           cp ./build-clojure $out/bin/build-clojure
         '';
+
+        pname = "iql";
+
+        uber = pkgs.stdenv.mkDerivation {
+          name = "inferenceql.query uberjar";
+          src = ./.;
+          nativeBuildInputs = [ build-clojure pkgs.git ];
+          buildPhase = ''
+            cp -R $src .
+            build-clojure -T:build uber
+          '';
+          installPhase = ''
+            cp -R target/*.jar $out
+          '';
+        };
+
+        mkJavaBin = platform: let
+          crossPlatformPkgs = inputs.nixpkgs.legacyPackages.${platform};
+        in pkgs.stdenv.mkDerivation rec {
+          name = "inferenceql.query";
+          inherit pname;
+          src = ./.;
+          nativeBuildInputs = [ crossPlatformPkgs.makeWrapper ];
+          buildInputs = [ crossPlatformPkgs.openjdk17 ];
+          installPhase = ''
+            makeWrapper ${crossPlatformPkgs.openjdk17}/bin/java $out/bin/${pname} \
+              --add-flags "-jar ${uber}"
+          '';
+        };
+
+        nativeBin = mkJavaBin system;
+
+        ociBin = mkJavaBin "x86_64-linux";
+
+        ociImg = pkgs.dockerTools.buildImage {
+          name = "inferenceql.query";
+          tag = "latest";
+          copyToRoot = [ ociBin ];
+          config = {
+            Cmd = [ "${ociBin}/bin/${pname}" ];
+          };
+        };
       in {
         devShells.default = pkgs.mkShell {
           buildInputs = [ jdk clojure ];
         };
 
         packages = rec {
-          uber = pkgs.stdenv.mkDerivation {
-            name = "inferenceql.query uberjar";
-            src = ./.;
-            nativeBuildInputs = [ build-clojure pkgs.git ];
-            buildPhase = ''
-              cp -R $src .
-              build-clojure -T:build uber
-            '';
-            installPhase = ''
-              cp -R target/*.jar $out
-            '';
-          };
-
-          default = pkgs.stdenv.mkDerivation rec {
-            name = "inferenceql.query";
-            pname = "iql";
-            src = ./.;
-            nativeBuildInputs = with pkgs; [ makeWrapper ];
-            buildInputs = [ jdk ];
-            installPhase = ''
-              makeWrapper ${jdk}/bin/java $out/bin/${pname} \
-                --add-flags "-jar ${uber}"
-            '';
-          };
+          inherit uber ociImg nativeBin ociBin;
+          bin = nativeBin;
+          default = bin;
         };
       };
     };
