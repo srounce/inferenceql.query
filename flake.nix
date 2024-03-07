@@ -21,68 +21,41 @@
         "x86_64-darwin"
         "x86_64-linux"
       ];
+
       perSystem = { system, pkgs, ... }: let
+        # in OCI context, whatever our host platform we want to build same arch but linux
+        systemWithLinux = builtins.replaceStrings [ "darwin" ] [ "multiplatform" ] system;
+
+        crossPkgsLinux = pkgs.pkgsCross.${systemWithLinux};
+
         jdk = pkgs.openjdk17;
         clojure = pkgs.clojure.override { jdk = jdk; };
 
-        build-clojure = pkgs.runCommand "build-clojure" {
-          __noChroot = true;
-          src = ./deps.edn;
-          nativeBuildInputs = [ clojure pkgs.git pkgs.makeWrapper ];
-        } ''
-          mkdir -p $out
-
-          makeWrapper ${pkgs.clojure}/bin/clojure ./build-clojure \
-            --set GIT_SSL_CAINFO ${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt \
-            --set CLJ_CONFIG $out/.clojure \
-            --set GITLIBS $out/.gitlibs \
-            --set JAVA_TOOL_OPTIONS "-Duser.home=$out"
-
-          cp $src ./deps.edn
-
-          ./build-clojure -A:build -P
-          ./build-clojure -P
-
-          mkdir -p $out/bin
-          cp ./build-clojure $out/bin/build-clojure
-        '';
-
         pname = "iql";
 
-        uber = pkgs.stdenv.mkDerivation {
-          name = "inferenceql.query uberjar";
-          src = ./.;
-          nativeBuildInputs = [ build-clojure pkgs.git ];
-          buildPhase = ''
-            cp -R $src .
-            build-clojure -T:build uber
-          '';
-          installPhase = ''
-            cp -R target/*.jar $out
-          '';
-        };
+        # TODO: is the inherit necessary given override ?
+        uber = pkgs.callPackage ./uber.nix {inherit clojure;};
 
-        mkJavaBin = platform: let
-          crossPlatformPkgs = inputs.nixpkgs.legacyPackages.${platform};
-        in pkgs.stdenv.mkDerivation rec {
+        mkJavaBin = {pkgs}: pkgs.stdenv.mkDerivation rec {
           name = "inferenceql.query";
           inherit pname;
           src = ./.;
-          nativeBuildInputs = [ crossPlatformPkgs.makeWrapper ];
-          buildInputs = [ crossPlatformPkgs.openjdk17 ];
+          nativeBuildInputs = [ pkgs.makeWrapper ];
+          buildInputs = [ pkgs.openjdk17 ];
           installPhase = ''
-            makeWrapper ${crossPlatformPkgs.openjdk17}/bin/java $out/bin/${pname} \
+            makeWrapper ${pkgs.openjdk17}/bin/java $out/bin/${pname} \
               --add-flags "-jar ${uber}"
           '';
         };
 
-        nativeBin = mkJavaBin system;
+        nativeBin = mkJavaBin {inherit pkgs ;};
 
-        ociBin = mkJavaBin "x86_64-linux";
+        ociBin = mkJavaBin {pkgs = crossPkgsLinux;} ;
 
         ociImg = pkgs.dockerTools.buildImage {
           name = "inferenceql.query";
           tag = "latest";
+          # architecture
           copyToRoot = [ ociBin ];
           config = {
             Cmd = [ "${ociBin}/bin/${pname}" ];
