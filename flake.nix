@@ -10,6 +10,11 @@
     };
     flake-parts = {
       url = "github:hercules-ci/flake-parts";
+      inputs.nixpkgs-lib.follows = "nixpkgs";
+    };
+    clj-nix = {
+      url = "github:jlesquembre/clj-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
     };
   };
 
@@ -24,60 +29,56 @@
 
       perSystem = { system, pkgs, ... }: let
         # in OCI context, whatever our host platform we want to build same arch but linux
-        systemWithLinux = builtins.replaceStrings [ "darwin" ] [ "multiplatform" ] system;
+        systemWithLinux = builtins.replaceStrings [ "darwin" ] [ "linux" ] system;
 
-        crossPkgsLinux = pkgs.pkgsCross.${systemWithLinux};
+        crossPkgsLinux = inputs.nixpkgs.${systemWithLinux}.legacyPackages;
+        #inputs.nixpkgs.legacyPackages.${systemWithLinux};
+
+        gpm-sppl-image = inputs.gpm-sppl.packages.${system}.ociImg;
+
+        uber = pkgs.callPackage ./uber.nix { };
 
         jdk = pkgs.openjdk17;
         clojure = pkgs.clojure.override { jdk = jdk; };
 
-        pname = "iql";
-
-        # TODO: is the inherit necessary given override ?
-        uber = pkgs.callPackage ./uber.nix {inherit clojure;};
-
-        mkJavaBin = {pkgs}: pkgs.stdenv.mkDerivation rec {
-          name = "inferenceql.query";
-          inherit pname;
-          src = ./.;
-          nativeBuildInputs = [ pkgs.makeWrapper ];
-          buildInputs = [ pkgs.openjdk17 ];
-          installPhase = ''
-            makeWrapper ${pkgs.openjdk17}/bin/java $out/bin/${pname} \
-              --add-flags "-jar ${uber}"
-          '';
-        };
-
-        nativeBin = mkJavaBin {inherit pkgs ;};
-
-        ociBin = mkJavaBin {pkgs = crossPkgsLinux;} ;
-
-        ociImg = pkgs.dockerTools.buildImage {
+        ociImg = pkgs.dockerTools.buildLayeredImage {
           name = "inferenceql.query";
           tag = "latest";
-          # architecture
-          copyToRoot = [ ociBin ];
-          config = {
-            Cmd = [ "${ociBin}/bin/${pname}" ];
-          };
+          #architecture
+          contents = [ uber ];
+          config.Cmd = [ "inferenceql.query-uberjar" ];
         };
 
-        ociImgWithSppl = pkgs.dockerTools.buildImage {
+        ociImgWithSppl = pkgs.dockerTools.buildLayeredImage {
           name = "inferenceql.query";
-          fromImage = inputs.gpm-sppl.ociImg;
-          copyToRoot = [ ociBin ];
-          config = {
-            Cmd = [ "${ociBin}/bin/${pname}" ];
-          };
+          tag = "sppl";
+          fromImage = gpm-sppl-image;
+          contents = [ uber ];
+          config.Cmd = [ "inferenceql.query-uberjar" ];
         };
       in {
+        _module.args.pkgs = import inputs.nixpkgs {
+          inherit system;
+          overlays = [
+            inputs.clj-nix.overlays.default
+          ];
+        };
+
         devShells.default = pkgs.mkShell {
-          buildInputs = [ jdk clojure ];
+          buildInputs = [
+            jdk
+            clojure
+            pkgs.deps-lock
+          ];
         };
 
         packages = rec {
-          inherit uber ociImg nativeBin ociBin ociImgWithSppl;
-          bin = nativeBin;
+          inherit
+            uber
+            ociImg
+            ociImgWithSppl;
+
+          bin = uber;
           default = bin;
         };
       };
